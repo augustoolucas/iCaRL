@@ -1,0 +1,3 @@
+---
+dataset: 'CIFAR100'
+n_tasks: 50
