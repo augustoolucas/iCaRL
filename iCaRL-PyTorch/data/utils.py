@@ -1,6 +1,25 @@
 import copy
+import torch
 import numpy as np
+from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
+
+def onehot_encoder(labels, n_classes):
+    labels_onehot = torch.zeros(labels.shape[0], n_classes)
+    labels_onehot.scatter_(1, labels.view(-1, 1), 1)
+
+    return labels_onehot
+
+def get_dataloader(dataset):
+    loader = DataLoader(
+        dataset,
+        batch_size=128,
+        num_workers=0,
+        pin_memory=True,
+        shuffle=True
+    )
+
+    return loader
 
 def load_data(dataset, train=True):
     if dataset == 'CIFAR100':
@@ -37,6 +56,7 @@ def create_tasks(n_tasks, data):
         tasks_sets.append(task_set)
 
     return tasks_sets
+
 
 def load_tasks(dataset, n_tasks, train=True):
     data = load_data(dataset, train)
