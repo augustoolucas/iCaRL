@@ -9,8 +9,66 @@ from torchvision.models import resnet34
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def icarl_construct_exemplar_set(class_set, m, model):
-    pass
+def get_dataset_features(model, dataset):
+    model.eval(); model.zero_grad()
+    dataloader = data.utils.get_dataloader(dataset)
+    features = torch.tensor(np.ndarray((0, 100)))
+
+    with torch.no_grad():
+        for imgs, labels in dataloader:
+            model_output = model(imgs.to(device))
+            features = torch.cat((features, model_output.to('cpu')))
+
+    return features
+
+def icarl_construct_exemplar_set(model, dataset, m):
+    model.eval(); model.zero_grad()
+
+    data_shape = dataset.data.shape[1:]
+    data_shape = (0,) + data_shape
+    exemplars_set = copy.copy(dataset)
+    exemplars_set.data = torch.tensor(np.ndarray(data_shape))
+    exemplars_set.targets = []
+
+    img_shape = (0, 3, 32, 32)
+
+    for cls in set(dataset.targets):
+        idxs = np.nonzero(np.array(dataset.targets) == cls)[0].tolist()
+        aux_set = copy.copy(dataset)
+        aux_set.data = dataset.data[idxs]
+        aux_set.targets = np.array(dataset.targets)[idxs].tolist()
+
+        features = get_dataset_features(model, aux_set)
+
+        class_mean = torch.mean(features, dim=0)
+        class_set = copy.copy(dataset)
+        class_set.data = torch.tensor(np.ndarray(img_shape))
+        class_set.targets = []
+
+        for k in range(m):
+            aux_features = torch.tensor(np.ndarray((0, 100)))
+
+            for j in range(k):
+                img = class_set.data[j].unsqueeze(0)
+                img = img.float()
+                model_output = model(img.to(device))
+                aux_features = torch.cat((aux_features,
+                                          model_output.to('cpu')))
+
+            arg = class_mean - (features + torch.sum(aux_features, dim=0))/k
+            pk_idx = torch.argmin(torch.sum(arg, dim=1)).item()
+            class_set.data = torch.cat((class_set.data,
+                                        dataset[pk_idx][0].unsqueeze(0)))
+
+            class_set.targets.append(dataset[pk_idx][1])
+
+        class_set.data = class_set.data.swapaxes(1, 2).swapaxes(2, 3)
+        class_set.data = class_set.data.numpy()
+        exemplars_set.data = np.concatenate((exemplars_set.data,
+                                             class_set.data))
+        exemplars_set.targets.extend(class_set.targets)
+
+    return exemplars_set
 
 
 def icarl_reduce_examplar_set(m, exemplars_set):
@@ -59,7 +117,9 @@ def icarl_update_representation(model, dataset, exemplars_set):
             total_loss_value = cls_loss_value + dist_loss_value
             total_loss_value.backward()
             optimizer.step()
-            
+
+    return model
+
 
 def icarl_incremental_train(model, dataset, k, exemplars_set):
     model = icarl_update_representation(model, dataset, exemplars_set)
@@ -68,10 +128,22 @@ def icarl_incremental_train(model, dataset, k, exemplars_set):
         m = k//len(set(exemplars_set.targets))
         exemplars_set = icarl_reduce_examplar_set(m, exemplars_set)
 
+    new_exemplars_set = icarl_construct_exemplar_set(model,
+                                                     dataset,
+                                                     k//len(set(dataset.targets)))
     return 
 
 
-def icarl_classify(img, class_exemplars):
+def icarl_classify(img, classes_exemplars, model):
+    exemplars_mean = torch.tensor(np.ndarray((0, 100)))
+
+    for exemplars in classes_exemplars:
+        features = get_dataset_features(exemplars)
+        class_mean = torch.mean(features, dim=0)
+        exemplars_mean = torch.cat((exemplars_mean, class_mean))
+
+    img_feat = model(img.to(device))
+    out_label = torch.argmin(img_feat - exemplars_mean)
     pass
 
 
@@ -91,7 +163,7 @@ def main(config):
     exemplars_set = None
     for task in range(config['n_tasks']):
         train_set = copy.copy(train_tasks[task])
-        icarl_incremental_train(model, train_set, 500, exemplars_set)
+        icarl_incremental_train(model, train_set, 2000, exemplars_set)
 
 
 def load_config(file):
