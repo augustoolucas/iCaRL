@@ -27,12 +27,12 @@ def icarl_construct_exemplar_set(model, dataset, m):
     data_shape = dataset.data.shape[1:]
     data_shape = (0,) + data_shape
     exemplars_set = copy.copy(dataset)
-    exemplars_set.data = torch.tensor(np.ndarray(data_shape))
+    exemplars_set.data = torch.tensor(np.ndarray(data_shape)).type(torch.uint8)
     exemplars_set.targets = []
 
     img_shape = (0, 3, 32, 32)
 
-    for cls in set(dataset.targets):
+    for cls_idx, cls in enumerate(set(dataset.targets)):
         idxs = np.nonzero(np.array(dataset.targets) == cls)[0].tolist()
         aux_set = copy.copy(dataset)
         aux_set.data = dataset.data[idxs]
@@ -56,13 +56,14 @@ def icarl_construct_exemplar_set(model, dataset, m):
 
             arg = class_mean - (features + torch.sum(aux_features, dim=0))/k
             pk_idx = torch.argmin(torch.sum(arg, dim=1)).item()
+            pk_idx += cls_idx*m
             class_set.data = torch.cat((class_set.data,
                                         dataset[pk_idx][0].unsqueeze(0)))
 
             class_set.targets.append(dataset[pk_idx][1])
 
         class_set.data = class_set.data.swapaxes(1, 2).swapaxes(2, 3)
-        class_set.data = class_set.data.numpy()
+        class_set.data = class_set.data.numpy().astype(np.uint8)
         exemplars_set.data = np.concatenate((exemplars_set.data,
                                              class_set.data))
         exemplars_set.targets.extend(class_set.targets)
@@ -95,11 +96,12 @@ def icarl_update_representation(model, dataset, exemplars_set):
 
     exemplars_labels = set(exemplars_set.targets) if exemplars_set else {}
 
-    old_model = copy.copy(model) 
+    model = model.to(device)
+    old_model = copy.deepcopy(model) 
     old_model = old_model.to(device)
 
     model.train(); old_model.eval()
-    for epoch in range(10):
+    for epoch in tqdm(range(70)):
         for batch, (imgs, labels) in enumerate(combined_loader):
             model.zero_grad()
             imgs, labels = imgs.to(device), labels.to(device)
@@ -112,16 +114,18 @@ def icarl_update_representation(model, dataset, exemplars_set):
             cls_loss_value = cls_loss_fn(current_model_output, labels)
             dist_loss_value = disti_loss_fn(previous_model_output,
                                             current_model_output[exemplars_idxs])
+            dist_loss_value = dist_loss_value if exemplars_set else 0
             total_loss_value = cls_loss_value + dist_loss_value
             total_loss_value.backward()
             optimizer.step()
+            output_list = torch.argmax(current_model_output, dim=1).tolist()
 
     return model
 
 
 def icarl_incremental_train(model, dataset, k, exemplars_set):
     model = icarl_update_representation(model, dataset, exemplars_set)
-    #data_loader = data.utils.get_dataloader(dataset)
+
     if exemplars_set:
         m = k//len(set(exemplars_set.targets))
         exemplars_set = icarl_reduce_examplar_set(m, exemplars_set)
@@ -129,7 +133,7 @@ def icarl_incremental_train(model, dataset, k, exemplars_set):
     new_exemplars_set = icarl_construct_exemplar_set(model,
                                                      dataset,
                                                      k//len(set(dataset.targets)))
-    return 
+    return new_exemplars_set
 
 
 def icarl_classify(img, classes_exemplars, model):
@@ -156,13 +160,16 @@ def main(config):
                                        train=False)
     
     model = resnet34(pretrained=True, progress=True).to(device)
-    model.fc = nn.Linear(512, 100)
+    model.fc = nn.Sequential(nn.Linear(512, 100), nn.Softmax(dim=1))
 
     exemplars_set = None
     bar = tqdm(range(config['n_tasks']))
     for task in bar:
         train_set = copy.copy(train_tasks[task])
-        icarl_incremental_train(model, train_set, 500, exemplars_set)
+        exemplars_set = icarl_incremental_train(model=model,
+                                                dataset=train_set,
+                                                k=500,
+                                                exemplars_set=exemplars_set)
 
 
 def load_config(file):
