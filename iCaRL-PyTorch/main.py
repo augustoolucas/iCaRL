@@ -48,12 +48,11 @@ def icarl_construct_exemplar_set(model, dataset, m):
         for k in range(m):
             aux_features = torch.tensor(np.ndarray((0, 100)))
 
-            for j in range(k):
-                img = class_set.data[j].unsqueeze(0)
-                img = img.float()
+            img = class_set.data[:k]
+            img = img.float()
+            with torch.no_grad():
                 model_output = model(img.to(device))
-                aux_features = torch.cat((aux_features,
-                                          model_output.to('cpu')))
+            aux_features = torch.cat((aux_features, model_output.to('cpu')))
 
             arg = class_mean - (features + torch.sum(aux_features, dim=0))/k
             pk_idx = torch.argmin(torch.sum(arg, dim=1)).item()
