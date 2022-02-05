@@ -98,9 +98,8 @@ def icarl_update_representation(model, dataset, exemplars_set):
     old_model = copy.copy(model) 
     old_model = old_model.to(device)
 
-    train_bar = tqdm(range(10))
     model.train(); old_model.eval()
-    for epoch in train_bar:
+    for epoch in range(10):
         for batch, (imgs, labels) in enumerate(combined_loader):
             model.zero_grad()
             imgs, labels = imgs.to(device), labels.to(device)
@@ -160,9 +159,10 @@ def main(config):
     model.fc = nn.Linear(512, 100)
 
     exemplars_set = None
-    for task in range(config['n_tasks']):
+    bar = tqdm(range(config['n_tasks']))
+    for task in bar:
         train_set = copy.copy(train_tasks[task])
-        icarl_incremental_train(model, train_set, 2000, exemplars_set)
+        icarl_incremental_train(model, train_set, 500, exemplars_set)
 
 
 def load_config(file):
