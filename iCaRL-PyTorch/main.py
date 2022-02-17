@@ -56,7 +56,7 @@ def icarl_construct_exemplar_set(model, dataset, m):
 
             arg = class_mean - (features + torch.sum(aux_features, dim=0))/k
             pk_idx = torch.argmin(torch.sum(arg, dim=1)).item()
-            pk_idx += cls_idx*m
+            pk_idx = idxs[pk_idx]
             class_set.data = torch.cat((class_set.data,
                                         dataset[pk_idx][0].unsqueeze(0)))
 
@@ -75,7 +75,7 @@ def icarl_reduce_examplar_set(m, exemplars_set):
     ex_set = copy.copy(exemplars_set)
     data_shape = ex_set.data.shape[1:]
     data_shape = (0,) + data_shape
-    ex_set.data = np.ndarray(data_shape)
+    ex_set.data = np.ndarray(data_shape, dtype=exemplars_set.data.dtype)
     ex_set.targets = []
     for cls in set(exemplars_set.targets):
         idxs = np.nonzero(np.array(exemplars_set.targets) == cls)[0].tolist()
@@ -127,12 +127,22 @@ def icarl_incremental_train(model, dataset, k, exemplars_set):
     model = icarl_update_representation(model, dataset, exemplars_set)
 
     if exemplars_set:
-        m = k//len(set(exemplars_set.targets))
+        m = k//(len(set(exemplars_set.targets)) + len(set(dataset.targets)))
         exemplars_set = icarl_reduce_examplar_set(m, exemplars_set)
 
-    new_exemplars_set = icarl_construct_exemplar_set(model,
-                                                     dataset,
-                                                     k//len(set(dataset.targets)))
+        new_exemplars_set = icarl_construct_exemplar_set(model,
+                                                         dataset,
+                                                         m)
+
+        new_exemplars_set.data = np.concatenate([exemplars_set.data,
+                                                 new_exemplars_set.data])
+        new_exemplars_set.targets = exemplars_set.targets + new_exemplars_set.targets
+    else:
+        m = k//len(set(dataset.targets))
+        new_exemplars_set = icarl_construct_exemplar_set(model,
+                                                         dataset,
+                                                         m)
+
     return new_exemplars_set
 
 
