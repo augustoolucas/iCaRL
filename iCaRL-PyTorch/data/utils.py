@@ -27,6 +27,11 @@ def load_data(dataset, train=True):
                                  download=True,
                                  train=train,
                                  transform=transforms.ToTensor())
+    elif dataset == 'CIFAR10':
+        data = datasets.CIFAR10(root='./Datasets',
+                                 download=True,
+                                 train=train,
+                                 transform=transforms.ToTensor())
     else:
         print('Invalid dataset.')
         exit()
