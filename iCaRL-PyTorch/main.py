@@ -2,10 +2,12 @@ import copy
 import yaml
 import torch
 import data
+from models import networks
 import numpy as np
 from tqdm import tqdm
 from torch import nn
 from torchvision.models import resnet34
+from sklearn.metrics import accuracy_score, confusion_matrix, ConfusionMatrixDisplay
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -30,7 +32,7 @@ def icarl_construct_exemplar_set(model, dataset, m):
     exemplars_set.data = torch.tensor(np.ndarray(data_shape)).type(torch.uint8)
     exemplars_set.targets = []
 
-    img_shape = (0, 3, 32, 32)
+    img_shape = (0, 32, 32, 3)
 
     for cls_idx, cls in enumerate(set(dataset.targets)):
         idxs = np.nonzero(np.array(dataset.targets) == cls)[0].tolist()
@@ -39,31 +41,32 @@ def icarl_construct_exemplar_set(model, dataset, m):
         aux_set.targets = np.array(dataset.targets)[idxs].tolist()
 
         features = get_dataset_features(model, aux_set)
-
         class_mean = torch.mean(features, dim=0)
+
         class_set = copy.copy(dataset)
-        class_set.data = torch.tensor(np.ndarray(img_shape))
+        class_set.data = np.ndarray(img_shape, dtype=dataset.data.dtype)
         class_set.targets = []
 
+        aux_features = torch.tensor(np.ndarray((0, 100)))
         for k in range(m):
-            aux_features = torch.tensor(np.ndarray((0, 100)))
-
-            img = class_set.data[:k]
-            img = img.float()
+            if k < 1:
+                imgs = torch.tensor(np.ndarray((0, 3, 32, 32)))
+            else:
+                imgs = torch.stack([d[0] for idx, d in enumerate(class_set) if idx < k])
             with torch.no_grad():
-                model_output = model(img.to(device))
+                model_output = model(imgs.to(device))
             aux_features = torch.cat((aux_features, model_output.to('cpu')))
 
             arg = class_mean - (features + torch.sum(aux_features, dim=0))/k
             pk_idx = torch.argmin(torch.sum(arg, dim=1)).item()
             pk_idx = idxs[pk_idx]
-            class_set.data = torch.cat((class_set.data,
-                                        dataset[pk_idx][0].unsqueeze(0)))
+            class_set.data = np.concatenate((class_set.data,
+                                             np.expand_dims(dataset.data[pk_idx], 0)))
 
             class_set.targets.append(dataset[pk_idx][1])
 
-        class_set.data = class_set.data.swapaxes(1, 2).swapaxes(2, 3)
-        class_set.data = class_set.data.numpy().astype(np.uint8)
+        #class_set.data = class_set.data.swapaxes(1, 2).swapaxes(2, 3)
+        class_set.data = (255*class_set.data).astype(np.uint8)
         exemplars_set.data = np.concatenate((exemplars_set.data,
                                              class_set.data))
         exemplars_set.targets.extend(class_set.targets)
@@ -87,7 +90,13 @@ def icarl_reduce_examplar_set(m, exemplars_set):
 
 
 def icarl_update_representation(model, dataset, exemplars_set):
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+    old_model = copy.deepcopy(model)
+
+    old_model = old_model.to(device)
+    model = model.to(device)
+    model.train(); old_model.eval()
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001, weight_decay=0.00001)
     cls_loss_fn = torch.nn.CrossEntropyLoss()
     disti_loss_fn = torch.nn.CrossEntropyLoss()
 
@@ -96,31 +105,69 @@ def icarl_update_representation(model, dataset, exemplars_set):
 
     exemplars_labels = set(exemplars_set.targets) if exemplars_set else {}
 
-    model = model.to(device)
-    old_model = copy.deepcopy(model) 
-    old_model = old_model.to(device)
-
-    model.train(); old_model.eval()
     for epoch in tqdm(range(70)):
         for batch, (imgs, labels) in enumerate(combined_loader):
             model.zero_grad()
             imgs, labels = imgs.to(device), labels.to(device)
             #onehot_labels = data.utils.onehot_encoder(labels, n_classes=100)
             exemplars_idxs = [idx for idx, label in enumerate(labels) if label.item() in exemplars_labels]
+            current_idxs = list(set(range(len(labels))) - set(exemplars_idxs))
+
             with torch.no_grad():
                 previous_model_output = old_model(imgs[exemplars_idxs])
             current_model_output = model(imgs)
+            #if exemplars_set and len(exemplars_idxs) == 0 : breakpoint()
             
-            cls_loss_value = cls_loss_fn(current_model_output, labels)
-            dist_loss_value = disti_loss_fn(previous_model_output,
-                                            current_model_output[exemplars_idxs])
-            dist_loss_value = dist_loss_value if exemplars_set else 0
+            cls_loss_value = cls_loss_fn(current_model_output[current_idxs], labels[current_idxs])/len(labels)
+            dist_loss_value = disti_loss_fn(current_model_output[exemplars_idxs], previous_model_output)/len(labels)
+            dist_loss_value = dist_loss_value if len(exemplars_idxs) > 0 else 0
             total_loss_value = cls_loss_value + dist_loss_value
             total_loss_value.backward()
             optimizer.step()
-            output_list = torch.argmax(current_model_output, dim=1).tolist()
+
+    task_acc = 0
+    model.eval()
+    for batch, (imgs, labels) in enumerate(combined_loader):
+        imgs, labels = imgs.to(device), labels.to(device)
+        current_model_output = model(imgs)
+        prediction = np.argmax(current_model_output.cpu().detach().numpy(), axis=1)
+        task_acc += accuracy_score(prediction, labels.tolist())
+
+    task_acc /= len(combined_loader)
+    print(f'task acc {task_acc}')
 
     return model
+
+
+def train(model, dataset):
+    model.train()
+    model = model.to(device)
+    dataloader = data.utils.get_dataloader(dataset)
+    optimizer_classifier = torch.optim.Adam(model.parameters(),
+                                            lr=0.001)
+    cls_loss_fn = torch.nn.CrossEntropyLoss()
+
+    for epoch in tqdm(range(20)):
+        for batch, (imgs, labels) in enumerate(dataloader):
+            model.zero_grad()
+            imgs, labels = imgs.to(device), labels.to(device)
+            model_output = model(imgs)
+            cls_loss_value = cls_loss_fn(model_output, labels)/len(labels)
+            cls_loss_value.backward()
+            optimizer_classifier.step()
+
+    model.eval()
+    task_acc = 0
+    for batch, (imgs, labels) in enumerate(dataloader):
+        imgs, labels = imgs.to(device), labels.to(device)
+        with torch.no_grad():
+            model_output = model(imgs)
+        prediction = torch.argmax(model_output, dim=1).tolist()
+        task_acc += accuracy_score(prediction, labels.tolist())
+
+    task_acc /= len(dataloader)
+
+    breakpoint()
 
 
 def icarl_incremental_train(model, dataset, k, exemplars_set):
@@ -143,21 +190,50 @@ def icarl_incremental_train(model, dataset, k, exemplars_set):
                                                          dataset,
                                                          m)
 
-    return new_exemplars_set
+    return model, new_exemplars_set
 
 
-def icarl_classify(img, classes_exemplars, model):
+def icarl_classify(test_tasks, classes_exemplars, model):
     exemplars_mean = torch.tensor(np.ndarray((0, 100)))
 
-    for exemplars in classes_exemplars:
-        features = get_dataset_features(exemplars)
+    for cls_idx, cls in enumerate(range(100)):
+        idxs = np.nonzero(np.array(classes_exemplars.targets) == cls)[0].tolist()
+        aux_set = copy.copy(classes_exemplars)
+        aux_set.data = classes_exemplars.data[idxs]
+        aux_set.targets = np.array(classes_exemplars.targets)[idxs].tolist()
+
+        features = get_dataset_features(model, aux_set)
         class_mean = torch.mean(features, dim=0)
-        exemplars_mean = torch.cat((exemplars_mean, class_mean))
+        exemplars_mean = torch.cat((exemplars_mean, class_mean.unsqueeze(0)))
 
-    img_feat = model(img.to(device))
-    out_label = torch.argmin(img_feat - exemplars_mean)
-    pass
+    print(torch.argmax(exemplars_mean, dim=1))
 
+    tasks_acc = []
+    model.eval(); model.zero_grad()
+    for test_task in test_tasks:
+        test_loader = data.utils.get_dataloader(test_task)
+        hits = 0
+        total_samples = 0
+        for imgs, labels in test_loader:
+            imgs = imgs.to(device)
+            total_samples += len(labels)
+            with torch.no_grad():
+                model_output = model(imgs)
+
+            for feat, lab in zip(model_output, labels):
+                differences = np.array([])
+                for exemplar_mean in exemplars_mean:
+                    differences = np.concatenate((differences,
+                                                  np.array([torch.sum(feat.cpu().detach() - exemplar_mean).tolist()])))
+                prediction = np.argmin(differences, axis=0)
+                if prediction == lab:
+                    hits += 1
+                
+        task_acc = hits/total_samples
+        tasks_acc.append(task_acc)
+    
+    test_acc = sum(tasks_acc)/len(tasks_acc)
+    return test_acc
 
 def main(config):
     ### ------ Load Data ------ ###
@@ -169,17 +245,22 @@ def main(config):
                                        config['n_tasks'],
                                        train=False)
     
-    model = resnet34(pretrained=True, progress=True).to(device)
-    model.fc = nn.Sequential(nn.Linear(512, 100), nn.Softmax(dim=1))
+    #model = resnet34(pretrained=False, progress=True).to(device)
+    #model.fc = nn.Sequential(nn.Linear(512, 100), nn.Softmax(dim=1))
+
+    model = networks.Classifier(n_classes=100)
 
     exemplars_set = None
     bar = tqdm(range(config['n_tasks']))
     for task in bar:
         train_set = copy.copy(train_tasks[task])
-        exemplars_set = icarl_incremental_train(model=model,
+        model, exemplars_set = icarl_incremental_train(model=model,
                                                 dataset=train_set,
-                                                k=500,
+                                                k=2000,
                                                 exemplars_set=exemplars_set)
+
+    test_acc = icarl_classify(test_tasks, exemplars_set, model)
+    print(f'Test Accuracy: {test_acc}')
 
 
 def load_config(file):
